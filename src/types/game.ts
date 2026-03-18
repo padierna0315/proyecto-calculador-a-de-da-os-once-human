@@ -10,6 +10,7 @@ export interface Target {
   category: TargetCategory;
   baseDamageReduction: number;
   elementalResistance: number;
+  distance: number;
 }
 
 export type Rarity = 'Legendary' | 'Epic' | 'Rare' | 'Common';

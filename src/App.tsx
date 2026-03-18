@@ -1,4 +1,4 @@
-import { Activity, ShieldAlert, Play, X, Target, Zap, Flame, Snowflake, Crosshair, Loader2 } from 'lucide-react';
+import { Activity, ShieldAlert, Play, X, Target, Zap, Flame, Snowflake, Crosshair, Loader2, Sword, Shield, Shirt, Hand, Footprints, HardHat } from 'lucide-react';
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ARMOR_PIECES, ARMOR_SETS } from './data/armor';
@@ -7,6 +7,7 @@ import { WEAPONS } from './data/weapons';
 import { SimulationEngine } from './engine/Simulator';
 import { useBuildStore } from './store/useBuildStore';
 import { ArmorSlotType, WeaponSlotType } from './types/game';
+import { CombatHub } from './combat_modules';
 
 type SlotSelection = { type: 'weapon', slot: WeaponSlotType } | { type: 'armor', slot: ArmorSlotType } | null;
 
@@ -21,6 +22,9 @@ export default function App() {
   const [targetSelection, setTargetSelection] = useState<'head' | 'torso'>('torso');
   const [dianaActive, setDianaActive] = useState(false);
   const [dianaStacks, setDianaStacks] = useState(0);
+  const [isTrainingDummyMode, setIsTrainingDummyMode] = useState(true);
+  const [distance, setDistance] = useState(10);
+  const [doombringerStacks, setDoombringerStacks] = useState(0);
   const [simEvents, setSimEvents] = useState<{ id: number, damage: number, isCrit: boolean, isWeakspot: boolean, type: string }[]>([]);
   const [simStatus, setSimStatus] = useState<'idle' | 'shooting' | 'reloading'>('idle');
   const [activeBuffs, setActiveBuffs] = useState<{ id: string, label: string, active: boolean, value?: string, procRate: string }[]>([
@@ -90,75 +94,91 @@ export default function App() {
     setIsSimulating(true);
     setTotalSimDamage(0);
     
+    // 1. Reinicio Estricto
+    let localDianaActive = false;
+    let localDoombringerStacks = 0;
+    setDianaActive(false);
+    setDoombringerStacks(0);
+    
     const baseStats = getEffectiveStats();
     const magSize = Math.round(equipment.Primary.magazineSize * (1 + baseStats.magazineCapacityBonus));
-    const reloadTime = 2460; // 2.46 seconds as requested
+    const reloadTime = 2460;
     
-    for (let cycle = 0; cycle < 2; cycle++) { // Run 2 full magazine cycles
+    for (let cycle = 0; cycle < 2; cycle++) {
       setSimStatus('shooting');
       for (let shot = 0; shot < magSize; shot++) {
         setCurrentMag(magSize - shot);
         
-        // Calculate Dynamic Shot Stats
-        const currentStats = getDynamicStats(dianaActive, dianaStacks);
+        // 1. Phase of Damage: Use current local state
+        const currentStats = getDynamicStats(localDianaActive, localDoombringerStacks);
         
         let shotDamage = 0;
-        let hadCrit = false;
-
-        // Simulate 6 pellets
-        const weaponBaseDamage = equipment.Primary.baseAttack * (1 + currentStats.weaponBaseDamageBonus);
-        const damagePerPellet = weaponBaseDamage / equipment.Primary.pelletCount;
+        let pelletsHit = 0;
 
         for (let p = 0; p < equipment.Primary.pelletCount; p++) {
-          let bonuses = 0;
-          const isWeakspot = targetSelection === 'head';
-          if (isWeakspot) bonuses += currentStats.weakspotDamage;
-
-          // Crit
-          let isPelletCrit = false;
-          if (Math.random() < currentStats.critRate) {
-            isPelletCrit = true;
-            bonuses += currentStats.critDamage;
-            hadCrit = true;
-          }
-
-          // New Formula: ( (DañoBaseArma + (PoderPsíquico * 18.5)) * MultiplicadorMunición )
-          // We apply this to the total base, then divide by pellets.
-          const baseDamage = equipment.Primary.baseAttack * (1 + currentStats.weaponBaseDamageBonus);
-          const psiDamage = currentStats.psiIntensity * 18.5;
           const ammoMult = config.ammoType === 'Tungsten' ? 1.10 : config.ammoType === 'Steel' ? 1.05 : 1.0;
           
-          let pelletDmg = ((baseDamage + psiDamage) * ammoMult) / equipment.Primary.pelletCount;
+          const kineticBaseNet = CombatHub.calculateKineticBaseNetDamage(
+            equipment.Primary.baseAttack,
+            localDoombringerStacks * 0.12,
+            currentStats.weaponBaseDamageBonus,
+            ammoMult
+          );
           
-          // Apply bonuses (Crit/Weakspot)
-          pelletDmg = pelletDmg * (1 + bonuses);
+          const pelletBase = kineticBaseNet / equipment.Primary.pelletCount;
           
-          // Diana Vulnerability (Multiplicative)
-          if (dianaActive) {
-            pelletDmg *= 1.08;
+          const missChance = isTrainingDummyMode ? 0 : 0.1;
+          const isHit = Math.random() > missChance;
+          
+          if (isHit) {
+            pelletsHit++;
+            
+            const bullseyeBuff = CombatHub.calculateBullseyeCritBuff(isTrainingDummyMode ? 2 : distance);
+            const isCrit = Math.random() < (currentStats.critRate + bullseyeBuff);
+            const isWeakspot = targetSelection === 'head';
+            
+            let pelletDmg = CombatHub.calculateImpactDamage(
+              pelletBase,
+              isCrit,
+              currentStats.critDamage,
+              isWeakspot,
+              currentStats.weakspotDamage
+            );
+            
+            const vulnBonus = localDianaActive ? 0.08 : 0;
+            const vulnMult = CombatHub.calculateVulnerabilityMultiplier(vulnBonus);
+            pelletDmg *= vulnMult;
+            
+            pelletDmg = Math.floor(pelletDmg);
+            shotDamage += pelletDmg;
+            
+            setSimEvents(prev => [...prev.slice(-10), { 
+              id: eventIdCounter.current++, 
+              damage: pelletDmg, 
+              isCrit: isCrit,
+              isWeakspot: isWeakspot,
+              type: 'normal'
+            }]);
           }
-          
-          pelletDmg = Math.floor(pelletDmg);
-          shotDamage += pelletDmg;
-          
-          // Add visual event per pellet
-          const newEvent = { 
-            id: eventIdCounter.current++, 
-            damage: pelletDmg, 
-            isCrit: isPelletCrit,
-            isWeakspot: isWeakspot,
-            type: 'normal'
-          };
-          setSimEvents(prev => [...prev.slice(-10), newEvent]);
+        }
+
+        // 2. Phase of Activation (Post-Impacto)
+        if (!localDianaActive) {
+          if (Math.random() < 0.8) {
+            localDianaActive = true;
+            setDianaActive(true);
+          }
+        } else if (pelletsHit === equipment.Primary.pelletCount) {
+          localDoombringerStacks = Math.min(localDoombringerStacks + 1, 3);
+          setDoombringerStacks(localDoombringerStacks);
+        } else {
+          localDoombringerStacks = 0;
+          setDoombringerStacks(0);
         }
 
         setTotalSimDamage(prev => prev + shotDamage);
         
-        // Update Buffs
-        activateDiana();
-        activateDianaStacks();
-
-        await new Promise(r => setTimeout(r, 383)); // 180 RPM = 3 shots in 1.15s = ~0.383s per shot
+        await new Promise(r => setTimeout(r, 383));
       }
 
       setCurrentMag(0);
@@ -205,74 +225,115 @@ export default function App() {
     );
   };
 
+  const getSlotIcon = (slotId: string) => {
+    switch (slotId) {
+      case 'Primary': return <Crosshair className="w-6 h-6 text-zinc-700" />;
+      case 'Secondary': return <Target className="w-6 h-6 text-zinc-700" />;
+      case 'Melee': return <Sword className="w-6 h-6 text-zinc-700" />;
+      case 'Helmet': return <HardHat className="w-6 h-6 text-zinc-700" />;
+      case 'Mask': return <Shield className="w-6 h-6 text-zinc-700" />;
+      case 'Top': return <Shirt className="w-6 h-6 text-zinc-700" />;
+      case 'Gloves': return <Hand className="w-6 h-6 text-zinc-700" />;
+      case 'Bottom': return <Shield className="w-6 h-6 text-zinc-700" />;
+      case 'Shoes': return <Footprints className="w-6 h-6 text-zinc-700" />;
+      default: return <Shield className="w-6 h-6 text-zinc-700" />;
+    }
+  };
+
+  const renderTooltipContent = (item: any, isWeapon: boolean) => {
+    if (!item) return null;
+    return (
+      <>
+        <div className="flex justify-between items-start mb-1">
+          <h4 className={`font-bold text-sm ${getRarityColor(item.rarity)}`}>{item.name}</h4>
+          <span className="text-[10px] bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-400">Categoría {getCategoryRoman(item.tier)}</span>
+        </div>
+        <div className="mb-2 flex justify-start">
+          {renderStars(item.stars, item.rarity)}
+        </div>
+        
+        {!isWeapon && item.isKeyEffect && (
+          <div className="mb-2 inline-block bg-indigo-900/50 border border-indigo-500/50 text-indigo-400 text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider">
+            Key Effect
+          </div>
+        )}
+
+        <p className="text-xs text-zinc-300 mb-3 leading-relaxed">{item.description}</p>
+        
+        {isWeapon && (
+          <div className="grid grid-cols-2 gap-2 text-[11px] text-zinc-400 bg-zinc-950/50 p-2.5 rounded border border-zinc-800/50">
+            <div className="flex justify-between"><span>Daño Base:</span> <span className="text-zinc-100 font-mono">
+              {item.pelletCount > 1 
+                ? `${Math.floor(item.baseAttack / item.pelletCount)}x${item.pelletCount}` 
+                : Math.floor(item.baseAttack)}
+            </span></div>
+            <div className="flex justify-between"><span>RPM:</span> <span className="text-zinc-100 font-mono">{item.rpm}</span></div>
+            <div className="flex justify-between"><span>Cargador:</span> <span className="text-zinc-100 font-mono">{item.magazineSize}</span></div>
+            <div className="flex justify-between"><span>T. Crítica:</span> <span className="text-zinc-100 font-mono">{(item.critRateBase * 100).toFixed(0)}%</span></div>
+          </div>
+        )}
+        
+        {!isWeapon && item.setId && (
+          <div className="mt-3 pt-3 border-t border-zinc-800">
+            <p className="text-[10px] font-bold text-zinc-500 mb-2 uppercase tracking-wider">Bonificaciones de Set</p>
+            <div className="space-y-1.5">
+              {ARMOR_SETS.find(s => s.id === item.setId)?.bonuses.map((b, i) => {
+                const isActive = getSetCounts()[item.setId] >= b.pieces;
+                return (
+                  <div key={i} className={`text-[11px] flex gap-2 ${isActive ? 'text-emerald-400 font-medium' : 'text-zinc-500'}`}>
+                    <span className="shrink-0 w-6">{b.pieces}pc:</span>
+                    <span>{b.description}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </>
+    );
+  };
+
   const renderSlot = (type: 'weapon' | 'armor', slotId: string, item: any, className: string = '') => {
     const isWeapon = type === 'weapon';
-    const borderClass = item ? getRarityBorder(item.rarity) : 'border-zinc-700 hover:border-zinc-500';
+    const borderClass = item ? getRarityBorder(item.rarity) : 'border-zinc-800 hover:border-zinc-600';
     
     return (
       <div 
         onClick={() => setSelectingSlot({ type, slot: slotId as any })}
-        className={`relative group cursor-pointer bg-zinc-800/80 border ${borderClass} transition-colors rounded flex flex-col items-center justify-center p-2 ${className}`}
+        className={`relative group cursor-pointer bg-zinc-900/80 border ${borderClass} transition-all duration-200 rounded-xl flex flex-col items-center justify-center p-3 ${className}`}
       >
         {/* Top left indicator */}
-        <div className="absolute top-1 left-1 flex items-center gap-1">
-          <div className={`w-1.5 h-1.5 rotate-45 ${item ? (item.rarity === 'Legendary' ? 'bg-yellow-500' : 'bg-purple-500') : 'bg-zinc-600'}`} />
+        <div className="absolute top-2 left-2 flex items-center gap-1">
+          <div className={`w-2 h-2 rotate-45 ${item ? (item.rarity === 'Legendary' ? 'bg-yellow-500 shadow-[0_0_8px_rgba(234,179,8,0.6)]' : 'bg-purple-500 shadow-[0_0_8px_rgba(168,85,247,0.6)]') : 'bg-zinc-700'}`} />
         </div>
         
         {/* Top right indicator (for weapons) */}
         {isWeapon && (
-          <div className="absolute top-1 right-1 bg-zinc-700 text-zinc-300 text-[10px] font-bold px-1.5 rounded-sm">
+          <div className="absolute top-2 right-2 bg-zinc-800 text-zinc-400 text-[10px] font-bold px-1.5 py-0.5 rounded-sm">
             {slotId === 'Primary' ? '1' : slotId === 'Secondary' ? '2' : 'M'}
           </div>
         )}
 
         {/* Content */}
         {item ? (
-          <div className="text-center mt-3">
-            <p className={`text-xs font-medium truncate w-full px-2 ${getRarityColor(item.rarity)}`}>{item.name}</p>
+          <div className="text-center mt-4 w-full">
+            <p className={`text-sm font-bold truncate w-full px-1 ${getRarityColor(item.rarity)}`}>{item.name}</p>
             {renderStars(item.stars, item.rarity)}
-            {isWeapon && <p className="text-[10px] text-zinc-500 mt-1">{item.type}</p>}
-            {!isWeapon && item.setId && <p className="text-[10px] text-zinc-500 mt-1">{ARMOR_SETS.find(s => s.id === item.setId)?.name}</p>}
+            {isWeapon && <p className="text-[10px] text-zinc-500 mt-1.5 uppercase tracking-wider">{item.type}</p>}
+            {!isWeapon && item.setId && <p className="text-[10px] text-zinc-500 mt-1.5 uppercase tracking-wider truncate px-2">{ARMOR_SETS.find(s => s.id === item.setId)?.name}</p>}
+            {!isWeapon && item.isKeyEffect && <p className="text-[10px] text-indigo-400 mt-1.5 uppercase tracking-wider font-bold">Key Effect</p>}
           </div>
         ) : (
-          <span className="text-xs text-zinc-600 uppercase tracking-wider">{slotId}</span>
+          <div className="flex flex-col items-center gap-2 opacity-40 group-hover:opacity-70 transition-opacity">
+            {getSlotIcon(slotId)}
+            <span className="text-[10px] text-zinc-500 uppercase tracking-widest font-medium">{slotId}</span>
+          </div>
         )}
 
         {/* Tooltip */}
         {item && (
-          <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-opacity bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 bg-zinc-900 border border-zinc-700 rounded-lg shadow-2xl p-3 pointer-events-none">
-            <div className="flex justify-between items-start mb-1">
-              <h4 className={`font-bold text-sm ${getRarityColor(item.rarity)}`}>{item.name}</h4>
-              <span className="text-[10px] bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-400">Categoría {getCategoryRoman(item.tier)}</span>
-            </div>
-            <div className="mb-2 flex justify-start">
-              {renderStars(item.stars, item.rarity)}
-            </div>
-            <p className="text-xs text-zinc-300 mb-2">{item.description}</p>
-            
-            {isWeapon && (
-              <div className="grid grid-cols-2 gap-1 text-[10px] text-zinc-400 bg-zinc-950 p-2 rounded">
-                <span>ATK: <span className="text-zinc-100">
-                  {item.pelletCount > 1 
-                    ? `${Math.floor((item.baseAttack * (1 + getEffectiveStats().weaponBaseDamageBonus)) / item.pelletCount)}x${item.pelletCount}` 
-                    : Math.floor(item.baseAttack * (1 + getEffectiveStats().weaponBaseDamageBonus))}
-                </span></span>
-                <span>RPM: <span className="text-zinc-100">{Math.round(item.rpm * (1 + getEffectiveStats().fireRateBonus))}</span></span>
-                <span>MAG: <span className="text-zinc-100">{Math.round(item.magazineSize * (1 + getEffectiveStats().magazineCapacityBonus))}</span></span>
-                <span>CRIT: <span className="text-zinc-100">{(getEffectiveStats().critRate * 100).toFixed(0)}%</span></span>
-              </div>
-            )}
-            
-            {!isWeapon && item.setId && (
-              <div className="mt-2 pt-2 border-t border-zinc-800">
-                <p className="text-[10px] font-bold text-zinc-500 mb-1">SET BONUSES</p>
-                {ARMOR_SETS.find(s => s.id === item.setId)?.bonuses.map((b, i) => (
-                  <p key={i} className={`text-[10px] ${getSetCounts()[item.setId] >= b.pieces ? 'text-emerald-400' : 'text-zinc-600'}`}>
-                    {b.pieces}pc: {b.description}
-                  </p>
-                ))}
-              </div>
-            )}
+          <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-1/2 -translate-x-1/2 mb-3 w-80 bg-zinc-900/95 backdrop-blur-xl border border-zinc-700 rounded-xl shadow-2xl p-4 pointer-events-none">
+            {renderTooltipContent(item, isWeapon)}
           </div>
         )}
       </div>
@@ -297,34 +358,30 @@ export default function App() {
           
           {/* Weapons Section */}
           <section>
-            <div className="flex items-center gap-2 mb-3 border-b border-zinc-800 pb-2">
-              <div className="w-1 h-4 bg-emerald-500" />
-              <h2 className="text-lg font-medium text-zinc-300">Arma</h2>
+            <div className="flex items-center gap-2 mb-4 border-b border-zinc-800 pb-3">
+              <div className="w-1.5 h-5 bg-emerald-500 rounded-full" />
+              <h2 className="text-xl font-bold text-zinc-100 tracking-tight">Armas</h2>
             </div>
-            <div className="grid grid-cols-3 gap-2 h-48">
-              <div className="col-span-2 grid grid-rows-2 gap-2">
-                {renderSlot('weapon', 'Primary', equipment.Primary)}
-                {renderSlot('weapon', 'Secondary', equipment.Secondary)}
-              </div>
-              <div className="col-span-1 h-full">
-                {renderSlot('weapon', 'Melee', equipment.Melee, 'h-full')}
-              </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {renderSlot('weapon', 'Primary', equipment.Primary, 'h-32')}
+              {renderSlot('weapon', 'Secondary', equipment.Secondary, 'h-32')}
+              {renderSlot('weapon', 'Melee', equipment.Melee, 'h-32')}
             </div>
           </section>
 
           {/* Armor Section */}
           <section>
-            <div className="flex items-center gap-2 mb-3 border-b border-zinc-800 pb-2">
-              <div className="w-1 h-4 bg-emerald-500" />
-              <h2 className="text-lg font-medium text-zinc-300">Equipamiento</h2>
+            <div className="flex items-center gap-2 mb-4 border-b border-zinc-800 pb-3">
+              <div className="w-1.5 h-5 bg-emerald-500 rounded-full" />
+              <h2 className="text-xl font-bold text-zinc-100 tracking-tight">Armadura</h2>
             </div>
-            <div className="grid grid-cols-4 gap-2">
-              {renderSlot('armor', 'Helmet', equipment.Helmet, 'h-24')}
-              {renderSlot('armor', 'Mask', equipment.Mask, 'h-24')}
-              {renderSlot('armor', 'Gloves', equipment.Gloves, 'h-24')}
-              {renderSlot('armor', 'Shoes', equipment.Shoes, 'h-24')}
-              {renderSlot('armor', 'Top', equipment.Top, 'h-24')}
-              {renderSlot('armor', 'Bottom', equipment.Bottom, 'h-24')}
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+              {renderSlot('armor', 'Helmet', equipment.Helmet, 'h-32')}
+              {renderSlot('armor', 'Mask', equipment.Mask, 'h-32')}
+              {renderSlot('armor', 'Top', equipment.Top, 'h-32')}
+              {renderSlot('armor', 'Gloves', equipment.Gloves, 'h-32')}
+              {renderSlot('armor', 'Bottom', equipment.Bottom, 'h-32')}
+              {renderSlot('armor', 'Shoes', equipment.Shoes, 'h-32')}
             </div>
           </section>
 
@@ -335,6 +392,15 @@ export default function App() {
               <h2 className="text-lg font-medium text-zinc-300">Configuración</h2>
             </div>
             <div className="bg-zinc-900/50 p-4 rounded-lg border border-zinc-800 space-y-4">
+              <div className="flex items-center justify-between">
+                <label className="text-sm text-zinc-400">Modo Muñeco de Pruebas</label>
+                <button 
+                  onClick={() => setIsTrainingDummyMode(!isTrainingDummyMode)}
+                  className={`px-3 py-1.5 text-xs rounded-md border ${isTrainingDummyMode ? 'bg-emerald-600 border-emerald-500 text-white' : 'bg-zinc-950 border-zinc-800 text-zinc-400'}`}
+                >
+                  {isTrainingDummyMode ? 'Activado' : 'Desactivado'}
+                </button>
+              </div>
               <div className="flex items-center justify-between">
                 <label className="text-sm text-zinc-400">Objetivo</label>
                 <div className="flex gap-2">
@@ -678,23 +744,24 @@ export default function App() {
       {/* Selection Modal */}
       {selectingSlot && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-2xl max-h-[80vh] flex flex-col shadow-2xl">
-            <div className="flex items-center justify-between p-4 border-b border-zinc-800">
-              <h3 className="text-lg font-semibold">Seleccionar {selectingSlot.slot}</h3>
-              <button onClick={() => setSelectingSlot(null)} className="p-1 hover:bg-zinc-800 rounded text-zinc-400 hover:text-white">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-4xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between p-5 border-b border-zinc-800 bg-zinc-900/50">
+              <h3 className="text-xl font-bold text-zinc-100">Seleccionar {selectingSlot.slot}</h3>
+              <button onClick={() => setSelectingSlot(null)} className="p-2 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors">
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="p-4 overflow-y-auto flex-1 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="p-5 overflow-y-auto flex-1 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 bg-zinc-950/50">
               <div 
                 onClick={() => {
                   if (selectingSlot.type === 'weapon') setWeapon(selectingSlot.slot as WeaponSlotType, null);
                   else setArmor(selectingSlot.slot as ArmorSlotType, null);
                   setSelectingSlot(null);
                 }}
-                className="p-3 border border-dashed border-zinc-700 rounded-lg hover:border-zinc-500 cursor-pointer flex items-center justify-center text-zinc-500"
+                className="p-4 border-2 border-dashed border-zinc-800 rounded-xl hover:border-zinc-600 hover:bg-zinc-900/50 cursor-pointer flex flex-col items-center justify-center text-zinc-500 transition-all min-h-[120px]"
               >
-                Desequipar
+                <X className="w-8 h-8 mb-2 opacity-50" />
+                <span className="font-medium uppercase tracking-wider text-sm">Desequipar</span>
               </div>
               
               {selectingSlot.type === 'weapon' ? (
@@ -702,16 +769,21 @@ export default function App() {
                   <div 
                     key={w.id}
                     onClick={() => { setWeapon(selectingSlot.slot as WeaponSlotType, w.id); setSelectingSlot(null); }}
-                    className={`p-3 bg-zinc-800/50 border ${getRarityBorder(w.rarity)} rounded-lg cursor-pointer group`}
+                    className={`relative p-4 bg-zinc-900 border ${getRarityBorder(w.rarity)} rounded-xl cursor-pointer group hover:shadow-lg transition-all`}
                   >
-                    <div className="flex justify-between items-start mb-1">
+                    <div className="flex justify-between items-start mb-2">
                       <div>
-                        <span className={`font-medium text-sm ${getRarityColor(w.rarity)}`}>{w.name}</span>
-                        <div className="flex justify-start">{renderStars(w.stars, w.rarity)}</div>
+                        <span className={`font-bold text-base ${getRarityColor(w.rarity)}`}>{w.name}</span>
+                        <div className="flex justify-start mt-1">{renderStars(w.stars, w.rarity)}</div>
                       </div>
-                      <span className="text-[10px] bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-400">{w.type}</span>
+                      <span className="text-[10px] bg-zinc-800 px-2 py-1 rounded-md text-zinc-400 font-medium uppercase tracking-wider">{w.type}</span>
                     </div>
-                    <p className="text-xs text-zinc-400 line-clamp-2 mt-2">{w.description}</p>
+                    <p className="text-xs text-zinc-400 line-clamp-2 mt-3 leading-relaxed">{w.description}</p>
+                    
+                    {/* Tooltip in Modal */}
+                    <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-1/2 -translate-x-1/2 mb-3 w-80 bg-zinc-900/95 backdrop-blur-xl border border-zinc-700 rounded-xl shadow-2xl p-4 pointer-events-none">
+                      {renderTooltipContent(w, true)}
+                    </div>
                   </div>
                 ))
               ) : (
@@ -719,16 +791,21 @@ export default function App() {
                   <div 
                     key={p.id}
                     onClick={() => { setArmor(selectingSlot.slot as ArmorSlotType, p.id); setSelectingSlot(null); }}
-                    className={`p-3 bg-zinc-800/50 border ${getRarityBorder(p.rarity)} rounded-lg cursor-pointer group`}
+                    className={`relative p-4 bg-zinc-900 border ${getRarityBorder(p.rarity)} rounded-xl cursor-pointer group hover:shadow-lg transition-all`}
                   >
-                    <div className="flex justify-between items-start mb-1">
+                    <div className="flex justify-between items-start mb-2">
                       <div>
-                        <span className={`font-medium text-sm ${getRarityColor(p.rarity)}`}>{p.name}</span>
-                        <div className="flex justify-start">{renderStars(p.stars, p.rarity)}</div>
+                        <span className={`font-bold text-base ${getRarityColor(p.rarity)}`}>{p.name}</span>
+                        <div className="flex justify-start mt-1">{renderStars(p.stars, p.rarity)}</div>
                       </div>
-                      {p.isKeyEffect && <span className="text-[10px] bg-indigo-900/50 text-indigo-400 px-1.5 py-0.5 rounded">Key Effect</span>}
+                      {p.isKeyEffect && <span className="text-[10px] bg-indigo-900/50 border border-indigo-500/30 text-indigo-400 px-2 py-1 rounded-md font-bold uppercase tracking-wider">Key Effect</span>}
                     </div>
-                    <p className="text-xs text-zinc-400 line-clamp-2 mt-2">{p.description}</p>
+                    <p className="text-xs text-zinc-400 line-clamp-2 mt-3 leading-relaxed">{p.description}</p>
+                    
+                    {/* Tooltip in Modal */}
+                    <div className="absolute z-50 invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-200 bottom-full left-1/2 -translate-x-1/2 mb-3 w-80 bg-zinc-900/95 backdrop-blur-xl border border-zinc-700 rounded-xl shadow-2xl p-4 pointer-events-none">
+                      {renderTooltipContent(p, false)}
+                    </div>
                   </div>
                 ))
               )}

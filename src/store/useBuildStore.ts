@@ -50,6 +50,7 @@ const defaultTarget: Target = {
   category: 'Normal',
   baseDamageReduction: 0,
   elementalResistance: 0,
+  distance: 5,
 };
 
 export const useBuildStore = create<BuildState>((set, get) => ({
